@@ -174,3 +174,184 @@ Profiling scripts are maintained under:
 - `investigate_anomalies.py` — Extraction and inspection of anomalous records.
 
 The profiling stage establishes the initial data-quality baseline for the Bronze → Silver → Gold data pipeline.
+
+
+## Bronze Layer — Raw Data Ingestion
+
+### 1. Objective
+
+The Bronze layer is the first stage of the data pipeline. Its purpose is to convert the original NASA FIRMS active-fire CSV datasets into a columnar storage format (Parquet) while preserving the source data and its provenance.
+
+The Bronze layer does not perform analytical transformations, sensor harmonization, data cleaning, or anomaly correction. Its primary responsibility is to establish a reliable, query-efficient representation of the source datasets for subsequent processing.
+
+### 2. Input Data
+
+The ingestion pipeline processes 12 CSV files covering five satellite platforms across three annual periods:
+
+| Satellite platform | Sensor family | Number of files |
+|---|---|---:|
+| Terra and Aqua | MODIS | 3 |
+| NOAA-20 | VIIRS | 3 |
+| NOAA-21 | VIIRS | 3 |
+| Suomi-NPP | VIIRS | 3 |
+| **Total** | | **12** |
+
+All source files share the same 15-column schema:
+
+`latitude, longitude, brightness, scan, track, acq_date, acq_time, satellite, instrument, confidence, version, bright_t31, frp, daynight, type`
+
+The source datasets contain approximately 14.8 GiB of CSV data and **196,335,668 records**.
+
+### 3. Implementation
+
+The ingestion pipeline is implemented in:
+
+`src/ingestion/bronze_ingestion.py`
+
+**Technology:** Python and DuckDB.
+
+The pipeline performs the following operations:
+
+1. Discovers CSV files inside the configured source-data directory.
+2. Validates that each input file has the expected source schema.
+3. Reads source columns as strings using DuckDB's CSV reader (`all_varchar=true`).
+4. Adds ingestion metadata to each record.
+5. Writes the resulting dataset to Parquet using Zstandard (ZSTD) compression.
+6. Validates the output record count against the corresponding input file.
+7. Uses a temporary output file before renaming it to its final name.
+
+### 4. Data Preservation and Metadata
+
+All 15 original source columns are retained without type conversion or analytical modification.
+
+Three metadata columns are appended:
+
+| Column | Description |
+|---|---|
+| `source_group` | Identifies the source group: MODIS, NOAA20, NOAA21, or SNPP. |
+| `source_file` | Original CSV filename from which the record was ingested. |
+| `ingested_at_utc` | UTC timestamp recorded for the ingestion of the corresponding source file. |
+
+Original source columns are stored as `VARCHAR` in Bronze.
+
+This is intentional: the Bronze layer preserves the original field representations, including values such as zero-padded acquisition times (`0001`) and sensor-specific confidence representations.
+
+Sensor-specific values are not normalized or converted at this stage.
+
+### 5. Output Structure
+
+Each source CSV produces one corresponding Parquet file.
+
+```text
+data/
+└── bronze/
+    ├── MODIS/
+    │   ├── fire_archive_M-C61_846646.parquet
+    │   ├── fire_archive_M-C61_846650.parquet
+    │   └── fire_archive_M-C61_846655.parquet
+    ├── NOAA20/
+    │   ├── fire_archive_J1V-C2_846647.parquet
+    │   ├── fire_archive_J1V-C2_846651.parquet
+    │   └── fire_archive_J1V-C2_846656.parquet
+    ├── NOAA21/
+    │   ├── fire_archive_J2V-C2_846648.parquet
+    │   ├── fire_archive_J2V-C2_846652.parquet
+    │   └── fire_archive_J2V-C2_846657.parquet
+    └── SNPP/
+        ├── fire_archive_SV-C2_846649.parquet
+        ├── fire_archive_SV-C2_846653.parquet
+        └── fire_archive_SV-C2_846658.parquet
+```
+
+The original CSV files and generated Parquet files are excluded from version control.
+
+### 6. Ingestion Results
+
+All 12 source files were successfully ingested.
+
+| Source group | Period 1 | Period 2 | Period 3 | Total records |
+|---|---:|---:|---:|---:|
+| MODIS | 4,707,068 | 4,817,661 | 3,587,395 | 13,112,124 |
+| NOAA-20 | 21,429,101 | 22,576,988 | 18,088,815 | 62,094,904 |
+| NOAA-21 | 21,118,821 | 21,681,655 | 17,278,920 | 60,079,396 |
+| Suomi-NPP | 21,969,453 | 20,970,878 | 18,108,913 | 61,049,244 |
+| **Total** | **69,224,443** | **70,047,182** | **57,064,043** | **196,335,668** |
+
+For every source file, the input CSV record count matched the generated Parquet record count.
+
+### 7. Idempotency and Re-ingestion
+
+The ingestion script skips output files that already exist by default. This prevents unnecessary reprocessing when the pipeline is executed again.
+
+To explicitly rebuild existing Bronze outputs, use the `--overwrite` option.
+
+The pipeline writes to a temporary Parquet file before renaming it to the final output filename. This reduces the risk of leaving a partially written file under the final output name if ingestion fails.
+
+### 8. Bronze Validation
+
+Validation is implemented separately in:
+
+`src/ingestion/validate_bronze.py`
+
+The validation script checks:
+
+- Exactly 12 expected Parquet files are present.
+- The output schema contains the 15 original columns and 3 metadata columns.
+- Original source columns retain the `VARCHAR` data type.
+- `ingested_at_utc` has the `TIMESTAMP WITH TIME ZONE` data type.
+- Source group and source filename metadata are consistent.
+- The known negative FRP anomaly is preserved.
+- All 29 known zero-brightness anomalies are preserved.
+
+**Validation result:**
+
+- 12/12 Parquet files passed validation.
+- Total records: 196,335,668.
+- Negative FRP anomaly preserved: 1.
+- Zero-brightness anomalies preserved: 29.
+- All Bronze validation checks passed.
+
+These checks establish structural consistency, record-count agreement, metadata consistency, and preservation of selected known anomalies. They do not constitute a complete row-by-row comparison or a byte-for-byte equivalence test against the original CSV files.
+
+### 9. Engineering Decisions
+
+**Why Parquet?**
+
+Parquet is a columnar storage format. Unlike CSV, it stores data by column, enabling analytical query engines such as DuckDB to read only the columns required by a query. It also supports compression and typed metadata, making it suitable for large analytical datasets.
+
+**Why DuckDB?**
+
+DuckDB provides an embedded analytical SQL engine capable of processing large CSV and Parquet datasets without requiring a distributed computing cluster. It is sufficient for the current dataset scale and keeps the development environment lightweight.
+
+**Why retain all source columns as strings?**
+
+The Bronze layer is intended to preserve source representations rather than impose analytical interpretations. Type conversion, timestamp construction, standardized satellite identifiers, and sensor-specific field handling are deferred to the Silver layer.
+
+**Why retain anomalies?**
+
+Anomalous records are not automatically deleted or corrected during ingestion. Their presence is documented through profiling, and they remain available for subsequent quality assessment and analysis.
+
+**Why one Parquet file per source CSV?**
+
+This preserves a direct relationship between each source file and its ingested output. Partitioning and file compaction can be considered later if query performance or file-management requirements justify them.
+
+### 10. Running the Bronze Pipeline
+
+Activate the project's virtual environment and execute:
+
+```powershell
+python src/ingestion/bronze_ingestion.py
+```
+
+To rebuild existing outputs:
+
+```powershell
+python src/ingestion/bronze_ingestion.py --overwrite
+```
+
+Run validation separately:
+
+```powershell
+python src/ingestion/validate_bronze.py
+```
+

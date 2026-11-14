@@ -39,3 +39,5 @@ Thumbs.db
 # Generated profiling reports
 profiling_stage2.json
 profiling_*.json
+
+*.parquet.tmp
