@@ -1,0 +1,37 @@
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Downloaded satellite data
+NASA_DATA_FROM_2023_TO_2026/
+
+# Generated datasets
+data/
+*.parquet
+*.csv
+
+# Logs and temporary outputs
+logs/
+*.log
+profiling_report.txt
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
