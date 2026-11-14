@@ -37,6 +37,7 @@ METADATA_COLUMNS = [
     "source_group",
     "source_file",
     "ingested_at_utc",
+    "source_record_number",
 ]
 
 # The input folder uses NPP, while our standardized
@@ -156,7 +157,8 @@ def ingest_file(con, source_file, overwrite=False):
                     *,
                     ? AS source_group,
                     ? AS source_file,
-                    CAST(? AS TIMESTAMPTZ) AS ingested_at_utc
+                    CAST(? AS TIMESTAMPTZ) AS ingested_at_utc,
+                    row_number() OVER() AS source_record_number     
                 FROM read_csv(
                     ?,
                     header = true,
@@ -214,6 +216,40 @@ def ingest_file(con, source_file, overwrite=False):
                 f"Actual:   {output_columns}"
             )
 
+        # Validate source record numbering before publishing.
+        record_stats = con.execute(
+            """
+            SELECT
+                COUNT(*) AS total_records,
+                COUNT(source_record_number) AS non_null_records,
+                COUNT(DISTINCT source_record_number) AS unique_records,
+                MIN(source_record_number) AS min_record_number,
+                MAX(source_record_number) AS max_record_number
+            FROM read_parquet(?)
+            """,
+            [str(temp_file)],
+        ).fetchone()
+
+        (
+            total,
+            non_null,
+            unique,
+            minimum,
+            maximum,
+        ) = record_stats
+
+        if (
+            non_null != total
+            or unique != total
+            or minimum != 1
+            or maximum != total
+        ):
+            raise RuntimeError(
+                f"Invalid source record numbering in {source_file.name}: "
+                f"total={total}, non_null={non_null}, "
+                f"unique={unique}, min={minimum}, max={maximum}"
+            )
+
         # Publish the completed output file.
         temp_file.replace(output_file)
 
@@ -251,6 +287,7 @@ def main():
 
     con = duckdb.connect()
     con.execute("SET threads = 4")
+    con.execute("SET preserve_insertion_order = true")
 
     try:
         for source_file in source_files:
