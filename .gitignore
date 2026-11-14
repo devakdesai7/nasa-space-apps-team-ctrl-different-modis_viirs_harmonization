@@ -35,3 +35,7 @@ profiling_report.txt
 # OS
 Thumbs.db
 .DS_Store
+
+# Generated profiling reports
+profiling_stage2.json
+profiling_*.json
